@@ -1,5 +1,6 @@
 import math
 import numpy as np
-import scipy
+from scipy.integrate import odeint
+from scipy.special import expit
 from . import mySolver
 from . import myAnimations
