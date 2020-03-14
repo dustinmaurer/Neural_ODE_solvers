@@ -1,9 +1,7 @@
-###
-###
-### This module contains functions relevant to:
-### Animating solutions
-###
-###
+"""
+    This module contains functions relevant to Animating solutions
+"""
+
 import matplotlib.pyplot as plt
 from matplotlib import animation, rc
 
