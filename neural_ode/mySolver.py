@@ -5,6 +5,7 @@
 import math
 import numpy as np
 from scipy.integrate import odeint
+from scipy.special import expit
 
 def get_trajectory(training_run, initial_conds, t=None):
   """ Solves the model in training_run for every weight matrix in the 'weight_trajectory' of training run
@@ -32,7 +33,7 @@ def model(state, t, weights):
       weights -- a matrix of interaction weights of dimensions <n,n>
   """ 
   state = np.array(state).reshape(1,-1)
-  new_state = 1 / (1 + math.exp(- state.dot(weights))) - state
+  new_state = expit(state.dot(weights)) - state
   new_state = new_state.tolist() # reshape the states coumn vector to a list <n>. Perhaps there is a better way of doing this without two 'reshape' operations.
   return new_state
 
