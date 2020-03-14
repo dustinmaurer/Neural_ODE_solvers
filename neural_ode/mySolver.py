@@ -2,10 +2,10 @@
     This module contains functions relevant to solving ODEs
 """
 
-import math
 import numpy as np
 from scipy.integrate import odeint
 from scipy.special import expit
+import matplotlib.pyplot as plt
 
 def get_trajectory(training_run, initial_conds, t=None):
   """ Solves the model in training_run for every weight matrix in the 'weight_trajectory' of training run
