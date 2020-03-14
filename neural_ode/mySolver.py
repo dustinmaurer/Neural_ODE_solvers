@@ -37,4 +37,27 @@ def model(state, t, weights):
   new_state = new_state.tolist() # reshape the states coumn vector to a list <n>. Perhaps there is a better way of doing this without two 'reshape' operations.
   return new_state
 
+def plot_ode(t, solution, n_cells=1, n_genes=None, figsize=(12, 6), vline=False):
+  """ Plot a simple line graph for a matrix of time-series. """
+  if n_genes is None: n_genes = 3
 
+  fig, axes = plt.subplots(ncols = n_cells, nrows = 1, figsize=figsize, constrained_layout = True)
+  if (n_cells == 1):
+    axes.plot(t, solution[:,:n_genes])
+    axes.set_title('Network Trajectory')
+    axes.set_xlabel('time')
+    axes.set_ylabel('y(t)')
+    axes.legend([i+1 for i in range(n_genes)], loc = 'upper left')
+    axes.set_ylim(0,1)
+    if vline: 
+      for time in t: 
+        axes.axvline(time, color = 'black', alpha = 0.5, ls = '--')
+  else:  
+    for i,ax in enumerate(axes):
+      ax.plot(t, solution[:,(i*n_genes):((1+i)*n_genes)])
+      ax.set_title('Network Trajectory')
+      ax.set_xlabel('time')
+      ax.set_ylabel('y(t)')
+      ax.legend([i+1 for i in range(n_genes)], loc = 'upper left')
+      ax.set_ylim(0,1)
+  fig.show()
