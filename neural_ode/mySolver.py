@@ -3,7 +3,7 @@
 ### This module contains functions relevant to solving ODEs
 ###
 ###
-#pylint: disable=no-member
+
 import math
 import numpy as np
 from scipy.integrate import odeint
