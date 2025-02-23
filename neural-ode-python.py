@@ -1,179 +1,118 @@
-from typing import Dict, List
-
-import numpy as np
 import torch
 import torch.nn as nn
-import uvicorn
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from torchdiffeq import odeint
 
 
-class EmbryoNeuralODE(nn.Module):
-    def __init__(self, n_cells: int = 100, hidden_dim: int = 64):
+class CellLifecycleODE(nn.Module):
+    def __init__(self):
         super().__init__()
-        # State dimension: x, y, z coordinates + additional features per cell
-        self.state_dim = 3
-        self.n_cells = n_cells
+        # Each cell state now includes:
+        # - x, y, z position (3)
+        # - viability score (1) - represents cell health/death probability
+        # - proliferation potential (1) - likelihood of division
+        self.state_dim = 5  # 3 spatial + 2 lifecycle dimensions
 
-        # Neural network for computing derivatives
-        self.net = nn.Sequential(
-            nn.Linear(self.state_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, self.state_dim),
+        # Neural network for cell dynamics
+        self.dynamics_net = nn.Sequential(
+            nn.Linear(self.state_dim, 32), nn.Tanh(), nn.Linear(32, self.state_dim)
         )
 
-        # Optional: Add spatial awareness
-        self.spatial_net = nn.Sequential(
-            nn.Linear(
-                self.state_dim * 2, hidden_dim
-            ),  # Input: cell state + relative positions
-            nn.Tanh(),
-            nn.Linear(hidden_dim, self.state_dim),
-        )
+    def handle_lifecycle_events(self, state, threshold=0.1):
+        """
+        Handle discrete events (death and division) based on continuous state
+        Returns: Updated state tensor with removed/added cells
+        """
+        # Reshape to get individual cell states
+        cells = state.view(-1, self.state_dim)
 
-    def compute_cell_interactions(self, state):
-        """Compute cell-cell interactions based on spatial relationships"""
-        batch_size = state.shape[0]
-        # Reshape state to (batch, n_cells, features)
-        state = state.view(batch_size, self.n_cells, -1)
+        # Get viability and proliferation scores
+        viability = cells[:, 3]
+        proliferation = cells[:, 4]
 
-        # Compute pairwise distances and interactions
-        diff = state.unsqueeze(2) - state.unsqueeze(
-            1
-        )  # shape: (batch, n_cells, n_cells, features)
-        dist = torch.norm(diff, dim=-1, keepdim=True)
+        # Remove cells with low viability (apoptosis)
+        viable_mask = viability > threshold
+        surviving_cells = cells[viable_mask]
 
-        # Simple interaction model: cells influence each other based on distance
-        interaction = torch.sum(
-            diff / (dist + 1e-8), dim=2
-        )  # shape: (batch, n_cells, features)
+        # Handle cell division
+        dividing_mask = proliferation > 0.8  # High proliferation score
+        dividing_cells = surviving_cells[dividing_mask]
 
-        return interaction.view(batch_size, -1)
+        if len(dividing_cells) > 0:
+            new_cells = []
+            for cell in dividing_cells:
+                # Create two daughter cells with slightly perturbed positions
+                daughter1 = cell.clone()
+                daughter2 = cell.clone()
+
+                # Add small random offset to positions
+                offset = torch.randn(3) * 0.1
+                daughter1[:3] += offset
+                daughter2[:3] -= offset
+
+                # Reset proliferation potential
+                daughter1[4] = 0.2  # Give time before next division
+                daughter2[4] = 0.2
+
+                new_cells.extend([daughter1, daughter2])
+
+            # Add new cells to surviving population
+            if new_cells:
+                new_cells_tensor = torch.stack(new_cells)
+                surviving_cells = torch.cat([surviving_cells, new_cells_tensor])
+
+        return surviving_cells
 
     def forward(self, t, state):
         """
-        Compute the derivative of the state with respect to time
-        Args:
-            t: Current time point
-            state: Current state tensor of shape (batch_size, n_cells * state_dim)
+        Compute continuous state changes and handle discrete events
         """
-        batch_size = state.shape[0]
+        # Continuous dynamics
+        derivatives = self.dynamics_net(state)
 
-        # Individual cell dynamics
-        individual_dynamics = self.net(state.view(-1, self.state_dim))
+        # Modify derivatives based on local environment
+        positions = state[:, :3]
+        densities = self.compute_local_density(positions)
 
-        # Cell-cell interactions
-        interactions = self.compute_cell_interactions(state)
-        interaction_effects = self.spatial_net(torch.cat([state, interactions], dim=-1))
+        # Adjust viability based on density (overcrowding leads to death)
+        derivatives[:, 3] -= 0.1 * densities
 
-        # Combine individual dynamics and interactions
-        derivative = individual_dynamics + interaction_effects
+        # Adjust proliferation based on density (contact inhibition)
+        derivatives[:, 4] -= 0.2 * densities
 
-        # Add some biological constraints (optional)
-        # For example, keep cells within a certain volume
-        state_reshaped = state.view(batch_size, self.n_cells, -1)
-        center_of_mass = torch.mean(state_reshaped, dim=1, keepdim=True)
-        displacement = state_reshaped - center_of_mass
-        volume_constraint = -0.1 * displacement.view(batch_size, -1)
+        return derivatives
 
-        return derivative + volume_constraint
+    def compute_local_density(self, positions, radius=1.0):
+        """
+        Compute local cell density for each cell
+        """
+        # Compute pairwise distances
+        diffs = positions.unsqueeze(0) - positions.unsqueeze(1)
+        distances = torch.norm(diffs, dim=-1)
 
-
-class SimulationConfig(BaseModel):
-    n_cells: int
-    time_points: List[float]
-    initial_state: List[List[float]]
-
-
-app = FastAPI()
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Global model instance
-model = None
+        # Count neighbors within radius
+        density = (distances < radius).float().sum(dim=-1)
+        return density
 
 
-@app.on_event("startup")
-async def startup_event():
-    global model
-    model = EmbryoNeuralODE(n_cells=100)
-    # Here you would typically load pre-trained weights
-    # model.load_state_dict(torch.load("pretrained_weights.pth"))
+# Example usage
+def simulate_with_lifecycle(model, initial_state, times):
+    trajectories = []
+    current_state = initial_state
+
+    for t1, t2 in zip(times[:-1], times[1:]):
+        # Solve ODE for short time interval
+        trajectory = odeint(model, current_state, torch.tensor([t1, t2]))
+
+        # Handle discrete events
+        current_state = model.handle_lifecycle_events(trajectory[-1])
+
+        trajectories.append(trajectory)
+
+    return trajectories
 
 
-@app.post("/simulate")
-async def simulate_development(config: SimulationConfig):
-    # Convert input data to tensors
-    initial_state = torch.tensor(config.initial_state, dtype=torch.float32)
-    time_points = torch.tensor(config.time_points, dtype=torch.float32)
-
-    # Run ODE solver
-    with torch.no_grad():
-        trajectory = odeint(
-            model,
-            initial_state,
-            time_points,
-            method="dopri5",  # Adaptive step-size solver
-            rtol=1e-3,
-            atol=1e-3,
-        )
-
-    # Convert trajectory to list for JSON serialization
-    trajectory_list = trajectory.numpy().tolist()
-
-    return {"trajectory": trajectory_list}
-
-
-@app.get("/healthcheck")
-async def healthcheck():
-    return {"status": "healthy"}
-
-
-def train_model(model, train_data, epochs=100):
-    """
-    Train the Neural ODE model using real or simulated data
-    Args:
-        model: EmbryoNeuralODE instance
-        train_data: Dictionary containing:
-            - initial_states: (batch_size, n_cells * state_dim)
-            - time_points: (n_times,)
-            - target_trajectories: (n_times, batch_size, n_cells * state_dim)
-    """
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-    for epoch in range(epochs):
-        optimizer.zero_grad()
-
-        # Forward pass through ODE solver
-        pred_trajectory = odeint(
-            model,
-            train_data["initial_states"],
-            train_data["time_points"],
-            method="dopri5",
-        )
-
-        # Compute loss
-        loss = torch.mean((pred_trajectory - train_data["target_trajectories"]) ** 2)
-
-        # Backward pass
-        loss.backward()
-        optimizer.step()
-
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch}, Loss: {loss.item():.6f}")
-
-
-if __name__ == "__main__":
-    # Run the FastAPI server
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+# Initialize
+model = CellLifecycleODE()
+initial_cells = torch.randn(10, 5)  # 10 cells with random initial states
+initial_cells[:, 3] = 0.9  # Set initial viability high
+initial_cells[:, 4] = 0.2  # Set initial proliferation potential low
