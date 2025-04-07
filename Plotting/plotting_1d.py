@@ -6,13 +6,14 @@ from tkinter import filedialog, messagebox, ttk
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.animation import FuncAnimation, PillowWriter
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 
 class CSVPlotterApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Multi-View CSV Plotter")
+        self.root.title("Multi-View CSV Plotter with GIF Export")
         self.root.geometry("1000x800")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -23,8 +24,18 @@ class CSVPlotterApp:
         ttk.Button(self.control_frame, text="Load CSV", command=self.load_csv).pack(
             side=tk.LEFT, padx=5, pady=5
         )
+        ttk.Button(
+            self.control_frame, text="Generate GIF", command=self.generate_gif
+        ).pack(side=tk.LEFT, padx=5, pady=5)
 
-        # Plot selection
+        ttk.Label(self.control_frame, text="Frame Delay (ms):").pack(
+            side=tk.LEFT, padx=5
+        )
+        self.delay_var = tk.IntVar(value=200)
+        ttk.Entry(self.control_frame, textvariable=self.delay_var, width=5).pack(
+            side=tk.LEFT, padx=5
+        )
+
         self.plot_var = tk.IntVar(value=1)
         for i in range(1, 5):
             rb = ttk.Radiobutton(
@@ -39,33 +50,25 @@ class CSVPlotterApp:
         self.file_label = ttk.Label(self.control_frame, text="No file loaded")
         self.file_label.pack(side=tk.LEFT, padx=5, pady=5)
 
-        # Create plot layout frame
         self.plot_frame = ttk.Frame(root)
         self.plot_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Initialize plots container
         self.plots = []
         self.canvases = []
         self.data_sources = [None] * 4
         self.current_view = 0
 
-        # Create all four plot areas initially (but only show the first one)
         for i in range(4):
             fig, ax = plt.subplots(figsize=(8, 5))
             canvas = FigureCanvasTkAgg(fig, master=self.plot_frame)
             canvas_widget = canvas.get_tk_widget()
-
-            # Only show the first plot initially
             if i == 0:
                 canvas_widget.pack(fill=tk.BOTH, expand=True)
 
-            # Initialize plot
             ax.set_title(f"Plot View {i+1}")
-            ax.set_xlabel("Time")
+            ax.set_xlabel("Time (t)")
             ax.set_ylabel("Value")
             ax.grid(True)
-
-            # Show initial instructions
             ax.text(
                 0.5,
                 0.5,
@@ -80,7 +83,6 @@ class CSVPlotterApp:
             self.plots.append((fig, ax))
             self.canvases.append(canvas)
 
-        # Status bar
         self.status_var = tk.StringVar(value="Ready")
         self.status_bar = ttk.Label(
             root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W
@@ -88,169 +90,137 @@ class CSVPlotterApp:
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
     def on_close(self):
-        # Handle window close event properly
         plt.close("all")
         self.root.quit()
         self.root.destroy()
         sys.exit(0)
 
     def switch_plot(self):
-        # Hide current plot
         self.canvases[self.current_view].get_tk_widget().pack_forget()
-
-        # Show selected plot
         self.current_view = self.plot_var.get() - 1
         self.canvases[self.current_view].get_tk_widget().pack(fill=tk.BOTH, expand=True)
-
-        # Update status bar to show information about the current plot
-        data = self.data_sources[self.current_view]
-        if data is not None:
-            if self.is_heatmap_data(data):
-                self.status_var.set(
-                    f"Plot {self.current_view+1}: Heatmap visualization"
-                )
-            else:
-                num_series = len(data.columns) - 1  # excluding time column
-                self.status_var.set(
-                    f"Plot {self.current_view+1}: {num_series} time series with {len(data)} points each"
-                )
-        else:
-            self.status_var.set(f"Plot {self.current_view+1}: No data loaded")
+        self.update_status()
 
     def load_csv(self):
-        # Open file dialog to select CSV file
         file_path = filedialog.askopenfilename(
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
             title="Select CSV File for Plot " + str(self.current_view + 1),
         )
-
         if not file_path:
             return
 
         try:
-            # Load the CSV file
             data = pd.read_csv(file_path)
+            required_cols = {"epoch", "t", "trajectory", "value"}
+            if not required_cols.issubset(data.columns):
+                raise ValueError(
+                    "CSV must contain 'epoch', 't', 'trajectory', and 'value' columns"
+                )
 
-            # Store data for the current plot
             self.data_sources[self.current_view] = data
-
-            # Update file label
             filename = os.path.basename(file_path)
             self.file_label.config(text=f"Plot {self.current_view+1}: {filename}")
-
-            # Check if the data is in heatmap format (row, column, value)
-            if self.is_heatmap_data(data):
-                self.plot_heatmap(data)
-            else:
-                # Check if the file has the expected format for time series
-                if "t" not in data.columns:
-                    messagebox.showwarning(
-                        "Format Warning",
-                        "CSV file doesn't contain a 't' column for time values. "
-                        "First column will be used as time axis.",
-                    )
-                    # Use the first column as the time column
-                    data = data.rename(columns={data.columns[0]: "t"})
-
-                # Plot the time series data
-                self.plot_time_series(data)
+            self.plot_static_preview(data)
+            self.update_status()
 
         except Exception as e:
             self.status_var.set(f"Error loading file: {str(e)}")
             messagebox.showerror("Error", f"Failed to load file: {str(e)}")
 
-    def is_heatmap_data(self, data):
-        """Check if data has row, column, value format suitable for heatmap"""
-        required_cols = {"row", "column", "value"}
-        return required_cols.issubset(set(map(str.lower, data.columns)))
-
-    def plot_heatmap(self, data):
-        """Plot data as a heatmap"""
-        # Get current figure and axis
+    def plot_static_preview(self, data):
+        """Show a static preview of all epochs"""
         fig, ax = self.plots[self.current_view]
         ax.clear()
 
-        # Extract row, column, value columns (case-insensitive)
-        cols = {col.lower(): col for col in data.columns}
+        trajectories = data["trajectory"].unique()
+        for traj in trajectories:
+            traj_data = data[data["trajectory"] == traj]
+            ax.plot(traj_data["t"], traj_data["value"], label=f"Traj {traj}", alpha=0.5)
 
-        row_col = cols.get("row") or next(
-            (c for c in data.columns if c.lower() == "row"), None
-        )
-        col_col = cols.get("column") or next(
-            (c for c in data.columns if c.lower() == "column"), None
-        )
-        val_col = cols.get("value") or next(
-            (c for c in data.columns if c.lower() == "value"), None
-        )
-
-        # Convert to matrix format
-        pivot_data = data.pivot(index=row_col, columns=col_col, values=val_col)
-
-        # Create heatmap
-        im = ax.imshow(pivot_data, cmap="coolwarm")
-        fig.colorbar(im, ax=ax, label=val_col)
-
-        # Set plot properties
-        ax.set_title(f"Heatmap Plot - Plot {self.current_view+1}")
-        ax.set_xlabel(col_col)
-        ax.set_ylabel(row_col)
-
-        # If the matrix is not too large, add value labels
-        if pivot_data.shape[0] <= 20 and pivot_data.shape[1] <= 20:
-            for i in range(pivot_data.shape[0]):
-                for j in range(pivot_data.shape[1]):
-                    if not np.isnan(pivot_data.iloc[i, j]):
-                        text = ax.text(
-                            j,
-                            i,
-                            f"{pivot_data.iloc[i, j]:.2f}",
-                            ha="center",
-                            va="center",
-                            color=(
-                                "w"
-                                if abs(pivot_data.iloc[i, j])
-                                > (pivot_data.max().max() / 2)
-                                else "black"
-                            ),
-                        )
-
-        # Update the plot
-        self.canvases[self.current_view].draw()
-
-        # Update status
-        self.status_var.set(
-            f"Plot {self.current_view+1}: Heatmap visualization ({pivot_data.shape[0]}x{pivot_data.shape[1]})"
-        )
-
-    def plot_time_series(self, data):
-        """Plot data as time series"""
-        # Get current figure and axis
-        fig, ax = self.plots[self.current_view]
-        ax.clear()
-
-        # Get time values
-        time_values = data["t"]
-
-        # Plot each data column except the time column
-        for column in data.columns:
-            if column != "t":
-                ax.plot(time_values, data[column], label=column)
-
-        # Set plot properties
-        ax.set_title(f"Time Series Plot - Plot {self.current_view+1}")
-        ax.set_xlabel("Time")
+        ax.set_title(f"All Epochs Preview - Plot {self.current_view+1}")
+        ax.set_xlabel("Time (t)")
         ax.set_ylabel("Value")
         ax.grid(True)
         ax.legend()
-
-        # Update the plot
         self.canvases[self.current_view].draw()
 
-        # Update status
-        num_series = len(data.columns) - 1  # excluding time column
-        self.status_var.set(
-            f"Plot {self.current_view+1}: {num_series} time series with {len(time_values)} points each"
+    def generate_gif(self):
+        """Generate and save a GIF animation"""
+        data = self.data_sources[self.current_view]
+        if data is None:
+            messagebox.showwarning("Warning", "Please load a CSV file first")
+            return
+
+        epochs = sorted(data["epoch"].unique())
+        trajectories = data["trajectory"].unique()
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        lines = {
+            traj: ax.plot([], [], label=f"Traj {traj}")[0] for traj in trajectories
+        }
+
+        def init():
+            ax.set_xlabel("Time (t)")
+            ax.set_ylabel("Value")
+            ax.set_title(f"Epoch {epochs[0]}")
+            ax.grid(True)
+            ax.legend()
+            for line in lines.values():
+                line.set_data([], [])
+            return lines.values()
+
+        def update(frame):
+            epoch = epochs[frame]
+            ax.set_title(f"Epoch {epoch}")
+            epoch_data = data[data["epoch"] == epoch]
+
+            # Set axis limits based on full data range
+            if frame == 0:
+                ax.set_xlim(data["t"].min(), data["t"].max())
+                ax.set_ylim(data["value"].min(), data["value"].max())
+
+            for traj in trajectories:
+                traj_data = epoch_data[epoch_data["trajectory"] == traj]
+                lines[traj].set_data(traj_data["t"], traj_data["value"])
+            return lines.values()
+
+        anim = FuncAnimation(
+            fig,
+            update,
+            init_func=init,
+            frames=len(epochs),
+            interval=self.delay_var.get(),
+            blit=True,
         )
+
+        # Save the GIF
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".gif",
+            filetypes=[("GIF files", "*.gif"), ("All files", "*.*")],
+            title="Save GIF As",
+        )
+        if save_path:
+            try:
+                writer = PillowWriter(fps=1000 / self.delay_var.get())
+                anim.save(save_path, writer=writer)
+                messagebox.showinfo("Success", f"GIF saved to {save_path}")
+                self.status_var.set(f"GIF saved: {os.path.basename(save_path)}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save GIF: {str(e)}")
+                self.status_var.set(f"Error saving GIF: {str(e)}")
+
+        plt.close(fig)
+
+    def update_status(self):
+        data = self.data_sources[self.current_view]
+        if data is not None:
+            epochs = len(data["epoch"].unique())
+            trajectories = len(data["trajectory"].unique())
+            self.status_var.set(
+                f"Plot {self.current_view+1}: {epochs} epochs, {trajectories} trajectories"
+            )
+        else:
+            self.status_var.set(f"Plot {self.current_view+1}: No data loaded")
 
 
 if __name__ == "__main__":
