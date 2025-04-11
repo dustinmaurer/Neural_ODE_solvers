@@ -7,6 +7,38 @@ import torch
 import torch.nn as nn
 
 
+def transform_long_to_wide(input_path):
+    """
+    Reads a long-format CSV, transforms it to wide format, and returns
+    time points and trajectories in the format expected by the old code.
+
+    Args:
+        input_path (str): Path to the long-format CSV file.
+
+    Returns:
+        tuple: (time_points, trajectories)
+            time_points: 1D numpy array of time values.
+            trajectories: 2D numpy array where each row is a trajectory.
+    """
+    df = pd.read_csv(input_path)
+
+    # Ensure the required columns exist
+    if not all(col in df.columns for col in ["t", "trajectory", "value"]):
+        raise ValueError(
+            "Input CSV must contain 't', 'trajectory', and 'value' columns."
+        )
+
+    # Pivot the DataFrame to convert from long to wide format
+    df_wide = df.pivot(index="t", columns="trajectory", values="value").reset_index()
+
+    time_points = df_wide["t"].values
+    trajectories = df_wide.drop(
+        columns=["t"], errors="ignore"
+    ).values.T  # Use errors='ignore'
+
+    return time_points, trajectories
+
+
 class SimplifiedODEModel(nn.Module):
     def __init__(self, n_trajectories):
         super(SimplifiedODEModel, self).__init__()
@@ -38,12 +70,18 @@ def fit_simplified_ode_with_epochs(
     trajectories,
     time_points,
     n_epochs=1000,
-    lr=0.01,
+    initial_lr=0.01,
+    min_lr=1e-6,
+    lr_scheduler_type="cosine",  # options: "reduce_on_plateau", "cosine", "step"
+    lr_patience=5,
+    lr_factor=0.5,  # factor to reduce learning rate by
+    lr_step_size=200,  # for step scheduler
     tol=1e-5,
     patience=10,
     save_interval=100,
+    verbose=False,
 ):
-    print("Starting model fitting with epoch tracking...")
+    print("Starting model fitting with epoch tracking and adaptive learning rate...")
     n_trajectories = trajectories.shape[0]
 
     trajectory_mins = trajectories.min(axis=1, keepdims=True)
@@ -53,7 +91,28 @@ def fit_simplified_ode_with_epochs(
     )
 
     model = SimplifiedODEModel(n_trajectories)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
+
+    # Setup learning rate scheduler based on selected type
+    if lr_scheduler_type == "reduce_on_plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=lr_factor,
+            patience=lr_patience,
+            verbose=verbose,
+            min_lr=min_lr,
+        )
+    elif lr_scheduler_type == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=n_epochs, eta_min=min_lr
+        )
+    elif lr_scheduler_type == "step":
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer, step_size=lr_step_size, gamma=lr_factor
+        )
+    else:
+        raise ValueError(f"Unknown scheduler type: {lr_scheduler_type}")
 
     t_tensor = torch.tensor(time_points, dtype=torch.float32)
     y_true = torch.tensor(normalized_trajectories, dtype=torch.float32)
@@ -69,8 +128,13 @@ def fit_simplified_ode_with_epochs(
 
     epoch_trajectories = {}
     epoch_weights = {}
+    lr_history = []
 
     for epoch in range(n_epochs):
+        # Store current learning rate
+        current_lr = optimizer.param_groups[0]["lr"]
+        lr_history.append(current_lr)
+
         optimizer.zero_grad()
 
         y0 = y_true[:, 0]
@@ -95,9 +159,20 @@ def fit_simplified_ode_with_epochs(
         # Check gradients
         grad_norm = torch.norm(model.shape_weights.grad)
         if epoch % save_interval == 0:
-            print(f"Epoch {epoch}: Gradient norm: {grad_norm.item():.6f}")
+            print(
+                f"Epoch {epoch}: Gradient norm: {grad_norm.item():.6f}, Learning rate: {current_lr:.6f}"
+            )
+
+        # Gradient clipping (optional but can help with stability)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         optimizer.step()
+
+        # Update learning rate scheduler
+        if lr_scheduler_type == "reduce_on_plateau":
+            scheduler.step(loss)
+        else:
+            scheduler.step()
 
         # Verify weights are changing (only compare when we have a previous saved epoch)
         weights_changed = True  # Default to True for early epochs
@@ -136,12 +211,14 @@ def fit_simplified_ode_with_epochs(
             )
             epoch_trajectories[epoch] = denormalized_y_pred
             epoch_weights[epoch] = model.shape_weights.detach().numpy().copy()
-            print(
-                f"Epoch {epoch}, Loss: {loss_val:.6f}, Loss Change: {loss_change:.6f}, "
-                f"Weights Changed: {weights_changed}, "
-                f"Weights Mean: {model.shape_weights.mean().item():.6f}, "
-                f"Weights Std: {model.shape_weights.std().item():.6f}"
-            )
+            if verbose:
+                print(
+                    f"Epoch {epoch}, Loss: {loss_val:.6f}, Loss Change: {loss_change:.6f}, "
+                    f"Learning Rate: {current_lr:.6f}, "
+                    f"Weights Changed: {weights_changed}, "
+                    f"Weights Mean: {model.shape_weights.mean().item():.6f}, "
+                    f"Weights Std: {model.shape_weights.std().item():.6f}"
+                )
 
     final_y_pred = (
         y_pred.detach().numpy() * (trajectory_maxs - trajectory_mins) + trajectory_mins
@@ -150,6 +227,7 @@ def fit_simplified_ode_with_epochs(
     print(
         f"Final weights mean: {model.shape_weights.mean().item():.6f}, std: {model.shape_weights.std().item():.6f}"
     )
+    print(f"Final learning rate: {optimizer.param_groups[0]['lr']:.8f}")
 
     return (
         model,
@@ -157,6 +235,7 @@ def fit_simplified_ode_with_epochs(
         normalized_trajectories,
         epoch_trajectories,
         epoch_weights,
+        # lr_history,
     )
 
 
@@ -167,9 +246,12 @@ def main(input_path):
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
     print(f"Loading data from {input_path}")
-    df = pd.read_csv(input_path)
-    time_points = df["t"].values
-    trajectories = df[[col for col in df.columns if col != "t"]].values.T
+    try:
+        time_points, trajectories = transform_long_to_wide(input_path)
+        print("Time Points shape:", time_points.shape)
+        print("Trajectories shape:", trajectories.shape)
+    except ValueError as e:
+        print(f"Error: {e}")
     print(
         f"Loaded data with {len(time_points)} time points and {trajectories.shape[0]} trajectories"
     )
@@ -182,7 +264,7 @@ def main(input_path):
         epoch_trajectories,
         epoch_weights,
     ) = fit_simplified_ode_with_epochs(
-        trajectories, time_points, save_interval=save_interval, lr=0.001
+        trajectories, time_points, save_interval=save_interval, initial_lr=0.1, tol=1e-8
     )
 
     # Save final parameters

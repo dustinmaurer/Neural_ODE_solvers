@@ -242,10 +242,11 @@ class SplineDrawingApp:
         except ValueError:
             num_samples = 50
 
-        time_series_data = {}
-        # Create time column
-        time_series_data["t"] = list(range(num_samples))
-        # max_time = num_samples - 1
+        # Create time values
+        time_values = list(range(num_samples))
+
+        # Dictionary to hold trajectory data before conversion to long format
+        trajectory_data = {}
 
         for line_num in self.all_lines:
             control_points = self.all_lines[line_num]["control_points"]
@@ -305,19 +306,29 @@ class SplineDrawingApp:
                 x_new = np.linspace(min(x_points), max(x_points), num_samples)
                 y_new = np.interp(x_new, x_points, y_points)
 
-            # Create time series with sequential time values
-            time_series = [(i, y_val) for i, y_val in zip(range(num_samples), y_new)]
-            time_series_data[f"x{line_num}"] = [y for _, y in time_series]
+            # Store values for this trajectory
+            trajectory_data[f"{line_num}"] = y_new
 
-        return time_series_data
+        # Convert to long format data
+        long_format_data = {"t": [], "trajectory": [], "value": []}
+
+        # Add an epoch column with default value of 0
+        long_format_data["epoch"] = []
+
+        for time_point in time_values:
+            for traj_name, values in trajectory_data.items():
+                long_format_data["t"].append(time_point)
+                long_format_data["trajectory"].append(traj_name)
+                long_format_data["value"].append(values[time_point])
+                long_format_data["epoch"].append(0)  # Default epoch value
+
+        return long_format_data
 
     def save_to_csv(self):
-        # Generate time series data
-        time_series_data = self.generate_time_series()
+        # Generate time series data in long format
+        long_format_data = self.generate_time_series()
 
-        if (
-            not time_series_data or len(time_series_data) <= 1
-        ):  # Only "t" column means no lines
+        if not long_format_data or len(long_format_data["t"]) == 0:
             self.result_text.delete(1.0, tk.END)
             self.result_text.insert(
                 tk.END,
@@ -329,12 +340,13 @@ class SplineDrawingApp:
         self.result_text.delete(1.0, tk.END)
 
         # Preview header
-        header = ",".join(time_series_data.keys())
+        header = ",".join(long_format_data.keys())
         self.result_text.insert(tk.END, f"{header}\n")
 
         # Preview first 5 rows
-        for i in range(min(5, len(time_series_data["t"]))):
-            row = [str(time_series_data[col][i]) for col in time_series_data.keys()]
+        num_rows = min(5, len(long_format_data["t"]))
+        for i in range(num_rows):
+            row = [str(long_format_data[col][i]) for col in long_format_data.keys()]
             self.result_text.insert(tk.END, f"{','.join(row)}\n")
 
         self.result_text.insert(tk.END, "...\n")
@@ -354,12 +366,12 @@ class SplineDrawingApp:
             writer = csv.writer(csvfile)
 
             # Write header
-            writer.writerow(time_series_data.keys())
+            writer.writerow(long_format_data.keys())
 
             # Write data rows
-            for i in range(len(time_series_data["t"])):
+            for i in range(len(long_format_data["t"])):
                 writer.writerow(
-                    [time_series_data[col][i] for col in time_series_data.keys()]
+                    [long_format_data[col][i] for col in long_format_data.keys()]
                 )
 
         self.result_text.insert(tk.END, f"\nData saved to {file_path}")

@@ -3,6 +3,7 @@ import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import matplotlib  # Import the base matplotlib module
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -25,6 +26,11 @@ class CSVPlotterApp:
             self.control_frame, text="Load Trajectories", command=self.load_trajectories
         ).pack(side=tk.LEFT, padx=5, pady=5)
         ttk.Button(
+            self.control_frame,
+            text="Load True Trajectory",
+            command=self.load_true_trajectory,
+        ).pack(side=tk.LEFT, padx=5, pady=5)
+        ttk.Button(
             self.control_frame, text="Load Weights", command=self.load_weights
         ).pack(side=tk.LEFT, padx=5, pady=5)
         ttk.Button(
@@ -41,6 +47,10 @@ class CSVPlotterApp:
 
         self.traj_label = ttk.Label(self.control_frame, text="No trajectories loaded")
         self.traj_label.pack(side=tk.LEFT, padx=5, pady=5)
+        self.true_traj_label = ttk.Label(
+            self.control_frame, text="No true trajectory loaded"
+        )
+        self.true_traj_label.pack(side=tk.LEFT, padx=5, pady=5)
         self.weights_label = ttk.Label(self.control_frame, text="No weights loaded")
         self.weights_label.pack(side=tk.LEFT, padx=5, pady=5)
 
@@ -54,6 +64,7 @@ class CSVPlotterApp:
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
         self.traj_data = None
+        self.true_traj_data = None
         self.weights_data = None
         self.traj_ylim = None
         self.weights_vmin = None
@@ -89,16 +100,87 @@ class CSVPlotterApp:
                     "Trajectories CSV must contain 'epoch', 't', 'trajectory', and 'value' columns"
                 )
             self.traj_data = data
-            self.traj_ylim = (
-                data["value"].min(),
-                data["value"].max(),
-            )  # Set global y-axis limits
+
+            # Update y-limits considering both trajectories and true trajectory
+            min_val = data["value"].min()
+            max_val = data["value"].max()
+
+            if self.true_traj_data is not None:
+                min_val = min(min_val, self.true_traj_data["value"].min())
+                max_val = max(max_val, self.true_traj_data["value"].max())
+
+            self.traj_ylim = (min_val, max_val)
             self.traj_label.config(text=f"Traj: {os.path.basename(file_path)}")
             self.plot_preview()
             self.update_status()
         except Exception as e:
             self.status_var.set(f"Error loading trajectories: {str(e)}")
             messagebox.showerror("Error", f"Failed to load trajectories: {str(e)}")
+
+    def load_true_trajectory(self):
+        file_path = filedialog.askopenfilename(
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Select True Trajectory CSV",
+        )
+        if not file_path:
+            return
+
+        try:
+            data = pd.read_csv(file_path)
+            # Check for required columns - true trajectory needs at least t, value, and optionally trajectory
+            required_cols = {"t", "value"}
+            if not required_cols.issubset(data.columns):
+                raise ValueError(
+                    "True trajectory CSV must contain 't' and 'value' columns"
+                )
+
+            self.true_traj_data = data
+
+            # Update y-limits considering both trajectories
+            if self.traj_data is not None:
+                min_val = min(data["value"].min(), self.traj_data["value"].min())
+                max_val = max(data["value"].max(), self.traj_data["value"].max())
+                self.traj_ylim = (min_val, max_val)
+            else:
+                self.traj_ylim = (data["value"].min(), data["value"].max())
+
+            # Update the label
+            self.true_traj_label.config(text=f"True: {os.path.basename(file_path)}")
+
+            # Plot each trajectory separately if the "trajectory" column exists
+            if "trajectory" in data.columns:
+                unique_trajectories = data["trajectory"].unique()
+                num_trajectories = len(unique_trajectories)
+                colors = matplotlib.pyplot.get_cmap(
+                    "viridis", num_trajectories
+                )  # Updated colormap
+
+                for i, traj in enumerate(unique_trajectories):
+                    traj_data = data[data["trajectory"] == traj]
+                    self.ax_traj.plot(
+                        traj_data["t"],
+                        traj_data["value"],
+                        label=f"True Traj {traj}",
+                        linestyle="--",
+                        alpha=0.7,
+                        color=colors(i),  # Assign a specific color from the colormap
+                    )
+            else:
+                # Plot a single trajectory if no "trajectory" column exists
+                self.ax_traj.plot(
+                    data["t"],
+                    data["value"],
+                    "k--",
+                    linewidth=2,
+                    alpha=0.3,
+                    label="True Trajectory",
+                )
+
+            self.plot_preview()
+            self.update_status()
+        except Exception as e:
+            self.status_var.set(f"Error loading true trajectory: {str(e)}")
+            messagebox.showerror("Error", f"Failed to load true trajectory: {str(e)}")
 
     def load_weights(self):
         file_path = filedialog.askopenfilename(
@@ -134,14 +216,52 @@ class CSVPlotterApp:
         self.ax_traj.set_xlabel("Time (t)")
         self.ax_traj.set_ylabel("Value")
         self.ax_traj.grid(True)
+
+        # Plot true trajectory (if available)
+        if self.true_traj_data is not None:
+            if (
+                "trajectory" in self.true_traj_data
+            ):  # Check if 'trajectory' column exists
+                true_trajectories = self.true_traj_data["trajectory"].unique()
+                for traj in true_trajectories:
+                    traj_data = self.true_traj_data[
+                        self.true_traj_data["trajectory"] == traj
+                    ]
+                    self.ax_traj.plot(
+                        traj_data["t"],
+                        traj_data["value"],
+                        linestyle="--",  # Consistent styling
+                        alpha=0.3,
+                        label=f"True Traj {traj}",  # Consistent label
+                        color="k",  # make it black
+                    )
+            else:
+                # If 'trajectory' column doesn't exist, plot it as a single trajectory
+                self.ax_traj.plot(
+                    self.true_traj_data["t"],
+                    self.true_traj_data["value"],
+                    linestyle="--",
+                    alpha=0.3,
+                    label="True Trajectory",
+                    color="k",
+                )
+
+        # Set y-limits if available
         if self.traj_data is not None:
             trajectories = self.traj_data["trajectory"].unique()
             for traj in trajectories:
                 traj_data = self.traj_data[self.traj_data["trajectory"] == traj]
                 self.ax_traj.plot(
-                    traj_data["t"], traj_data["value"], label=f"Traj {traj}", alpha=0.5
+                    traj_data["t"], traj_data["value"], label=f"Traj {traj}", alpha=0.7
                 )
-            self.ax_traj.set_ylim(self.traj_ylim)
+
+            if self.traj_ylim:
+                self.ax_traj.set_ylim(self.traj_ylim)
+            self.ax_traj.legend()
+        elif self.true_traj_data is not None:
+            # If only true trajectory is loaded
+            if self.traj_ylim:
+                self.ax_traj.set_ylim(self.traj_ylim)
             self.ax_traj.legend()
         else:
             self.ax_traj.text(
@@ -227,12 +347,42 @@ class CSVPlotterApp:
             self.ax_traj.set_ylabel("Value")
             self.ax_traj.set_ylim(self.traj_ylim)
             self.ax_traj.grid(True)
+
+            # Plot true trajectory (if available)
+            if self.true_traj_data is not None:
+                if (
+                    "trajectory" in self.true_traj_data
+                ):  # Check if 'trajectory' column exists
+                    true_trajectories = self.true_traj_data["trajectory"].unique()
+                    for traj in true_trajectories:
+                        traj_data = self.true_traj_data[
+                            self.true_traj_data["trajectory"] == traj
+                        ]
+                        self.ax_traj.plot(
+                            traj_data["t"],
+                            traj_data["value"],
+                            linestyle="--",  # Consistent styling
+                            alpha=0.3,
+                            label=f"True Traj {traj}",  # Consistent label
+                            color="k",  # make it black
+                        )
+                else:
+                    # If 'trajectory' column doesn't exist, plot it as a single trajectory
+                    self.ax_traj.plot(
+                        self.true_traj_data["t"],
+                        self.true_traj_data["value"],
+                        linestyle="--",
+                        alpha=0.3,
+                        label="True Trajectory",
+                        color="k",
+                    )
+
             epoch_traj = self.traj_data[self.traj_data["epoch"] == epoch]
             self.ax_traj.set_xlim(self.traj_data["t"].min(), self.traj_data["t"].max())
             for traj in trajectories:
                 traj_data = epoch_traj[epoch_traj["trajectory"] == traj]
                 self.ax_traj.plot(
-                    traj_data["t"], traj_data["value"], label=f"Traj {traj}"
+                    traj_data["t"], traj_data["value"], label=f"Traj {traj}", alpha=0.7
                 )
             self.ax_traj.legend()
 
@@ -290,6 +440,8 @@ class CSVPlotterApp:
             epochs = len(self.traj_data["epoch"].unique())
             trajectories = len(self.traj_data["trajectory"].unique())
             status.append(f"Traj: {epochs} epochs, {trajectories} trajectories")
+        if self.true_traj_data is not None:
+            status.append(f"True Trajectory: {len(self.true_traj_data)} points")
         if self.weights_data is not None:
             epochs = len(self.weights_data["epoch"].unique())
             rows = self.weights_data["row"].max() + 1
