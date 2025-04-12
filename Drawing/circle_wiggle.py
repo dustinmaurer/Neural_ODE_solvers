@@ -1,6 +1,8 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FuncAnimation
+from matplotlib.cm import RdBu
+from matplotlib.colors import Normalize
 from matplotlib.patches import Circle
 from matplotlib.widgets import Button
 
@@ -8,7 +10,7 @@ from matplotlib.widgets import Button
 fig, ax = plt.subplots()
 ax.set_xlim(0, 10)
 ax.set_ylim(0, 10)
-ax.set_title("Brownian Motion with Collisions and Auto-Division")
+ax.set_title("Brownian Motion with Force-Inhibited Growth")
 
 
 # Cell list: start with one circle
@@ -17,7 +19,9 @@ def init_cell():
         "patch": Circle((5, 5), radius=0.5, color="blue", alpha=0.5),
         "velocity": np.array([0.0, 0.0]),
         "age": 0.0,
-        "label": ax.text(5, 5, "(0.00, 0.50)", ha="center", va="center", fontsize=8),
+        "label": ax.text(
+            5, 5, "(0.00, 0.50, 0.00)", ha="center", va="center", fontsize=8
+        ),
     }
 
 
@@ -26,30 +30,41 @@ for cell in cells:
     ax.add_patch(cell["patch"])
 
 # Animation parameters
-noise_sigma = 0.03  # Brownian motion strength
+noise_sigma = 0.02  # Brownian motion strength
 running = False  # Start paused
 dt = 0.05  # Time step (seconds)
-k_spring = 2.5  # Spring constant for collisions
+k_spring = 3  # Spring constant for collisions
 selected_cell = None  # Track selected cell
+b_drag = 0.1  # Drag coefficient
 
 # Growth parameters (Hill equation based on size)
-V_max = 0.2  # Max growth rate (radius units/second)
+V_max = 0.3  # Max growth rate (radius units/second)
 r_max = 1.0  # Maximum radius
+r_min = 0.1  # Minimum radius to prevent vanishing
 K = 0.5  # Growth capacity for half-maximal rate
 n = 2.0  # Hill coefficient
+
+# Sigmoid inhibition parameters
+s = 1.0  # Steepness of sigmoid
+F0 = 1.0  # Force magnitude for 50% inhibition
+decay = 0.02  # Baseline growth decay
+
+# Color mapping for growth rate
+norm = Normalize(vmin=-0.01, vmax=0.01)  # Map growth_rate to colors
+cmap = RdBu  # Red (negative), Blue (positive)
 
 
 # Animation update function
 def update(frame):
     global cells, selected_cell
     if running:
-        # Handle auto-division first
+        # Handle auto-division based on size
         new_cells = []
         cells_to_keep = []
         for cell in cells:
-            if cell["age"] >= 5.0:
+            r = cell["patch"].radius
+            if r >= 0.95 * r_max:  # Within 5% of max radius
                 x, y = cell["patch"].center
-                r = cell["patch"].radius
                 cell["label"].remove()
 
                 r_new = r / np.sqrt(2)
@@ -67,7 +82,7 @@ def update(frame):
                     "label": ax.text(
                         x + dx,
                         y + dy,
-                        f"(0.00, {r_new:.2f})",
+                        f"(0.00, {r_new:.2f}, 0.00)",
                         ha="center",
                         va="center",
                         fontsize=8,
@@ -82,7 +97,7 @@ def update(frame):
                     "label": ax.text(
                         x - dx,
                         y - dy,
-                        f"(0.00, {r_new:.2f})",
+                        f"(0.00, {r_new:.2f}, 0.00)",
                         ha="center",
                         va="center",
                         fontsize=8,
@@ -98,7 +113,7 @@ def update(frame):
 
         cells = cells_to_keep + new_cells
 
-        # Now compute collisions with updated cell list
+        # Compute collisions
         positions = np.array([cell["patch"].center for cell in cells])
         radii = np.array([cell["patch"].radius for cell in cells])
         num_cells = len(cells)
@@ -106,12 +121,12 @@ def update(frame):
         forces = np.zeros((num_cells, 2))
         for i in range(num_cells):
             for j in range(i + 1, num_cells):
-                delta = positions[j] - positions[i]
+                delta = positions[j] - positions[i]  # From j to i
                 dist = np.linalg.norm(delta)
                 r_sum = radii[i] + radii[j]
                 if dist < r_sum and dist > 0:
                     overlap = r_sum - dist
-                    force_dir = delta / dist
+                    force_dir = delta / dist  # Points from i to j
                     force_mag = k_spring * overlap
                     forces[i] -= force_mag * force_dir  # Push i away from j
                     forces[j] += force_mag * force_dir  # Push j away from i
@@ -131,6 +146,10 @@ def update(frame):
             vx += forces[i][0] * dt
             vy += forces[i][1] * dt
 
+            # Drag force: F = -b * v
+            vx += -b_drag * vx * dt
+            vy += -b_drag * vy * dt
+
             # Update position
             x += vx * dt
             y += vy * dt
@@ -149,11 +168,23 @@ def update(frame):
                 y = 10 - r
                 vy = -vy
 
-            # Growth (Hill: dr/dt = V_max * ((r_max - r)^n / (K^n + (r_max - r)^n)))
+            # Growth with inhibition
             growth_capacity = max(r_max - r, 0)
             growth_rate = V_max * (growth_capacity**n / (K**n + growth_capacity**n))
+            # Sigmoid inhibition: 1 / (1 + exp(-s * (|F| - F0)))
+            force_mag = np.linalg.norm(forces[i])
+            inhibition = 1 / (1 + np.exp(-s * (force_mag - F0)))
+            growth_rate *= (
+                1 - inhibition - decay
+            )  # Reduce growth by inhibition and decay
             r += growth_rate * dt
-            r = min(r, r_max)
+            r = max(r, r_min)  # Prevent vanishing
+
+            # Update color based on growth_rate
+            color = cmap(norm(growth_rate))
+            cell["patch"].set_color(color)
+            if cell == selected_cell:
+                cell["patch"].set_color("yellow")  # Override for selection
 
             # Update age
             age += dt
@@ -164,7 +195,7 @@ def update(frame):
             cell["velocity"] = np.array([vx, vy])
             cell["age"] = age
             cell["label"].set_position((x, y))
-            cell["label"].set_text(f"({age:.2f}, {r:.2f})")
+            cell["label"].set_text(f"({age:.2f}, {r:.2f}, {growth_rate:.2f})")
 
     return [cell["patch"] for cell in cells] + [cell["label"] for cell in cells]
 
@@ -179,6 +210,20 @@ def toggle(event):
 # Divide selected cell
 def divide(event):
     global selected_cell
+    # If no cell selected, pick closest to plot center (5, 5)
+    if not selected_cell and cells:
+        ref_x, ref_y = 5, 5  # Plot center
+        min_dist = float("inf")
+        closest_cell = None
+        for cell in cells:
+            x, y = cell["patch"].center
+            dist = np.sqrt((ref_x - x) ** 2 + (ref_y - y) ** 2)
+            if dist < min_dist:
+                min_dist = dist
+                closest_cell = cell
+        selected_cell = closest_cell
+        update_selection()
+
     if selected_cell:
         cells.remove(selected_cell)
         x, y = selected_cell["patch"].center
@@ -198,7 +243,7 @@ def divide(event):
             "label": ax.text(
                 x + dx,
                 y + dy,
-                f"(0.00, {r_new:.2f})",
+                f"(0.00, {r_new:.2f}, 0.00)",
                 ha="center",
                 va="center",
                 fontsize=8,
@@ -211,7 +256,7 @@ def divide(event):
             "label": ax.text(
                 x - dx,
                 y - dy,
-                f"(0.00, {r_new:.2f})",
+                f"(0.00, {r_new:.2f}, 0.00)",
                 ha="center",
                 va="center",
                 fontsize=8,
@@ -263,7 +308,18 @@ def on_click(event):
 # Update cell colors based on selection
 def update_selection():
     for cell in cells:
-        cell["patch"].set_color("red" if cell == selected_cell else "blue")
+        if cell == selected_cell:
+            cell["patch"].set_color("yellow")
+        else:
+            # Restore color based on growth_rate
+            r = cell["patch"].radius
+            growth_capacity = max(r_max - r, 0)
+            growth_rate = V_max * (growth_capacity**n / (K**n + growth_capacity**n))
+            force_mag = np.linalg.norm(cell.get("last_force", np.array([0.0, 0.0])))
+            inhibition = 1 / (1 + np.exp(-s * (force_mag - F0)))
+            growth_rate *= 1 - inhibition - decay
+            color = cmap(norm(growth_rate))
+            cell["patch"].set_color(color)
 
 
 # Connect click handler
@@ -283,7 +339,7 @@ reset_button = Button(reset_ax, "Reset")
 reset_button.on_clicked(reset)
 
 # Setup animation
-ani = FuncAnimation(fig, update, interval=50, blit=True)
+ani = FuncAnimation(fig, update, interval=50, blit=True, cache_frame_data=False)
 
 # Show window
 plt.show()
