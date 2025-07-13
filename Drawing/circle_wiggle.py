@@ -33,9 +33,9 @@ for cell in cells:
 noise_sigma = 0.02  # Brownian motion strength
 running = False  # Start paused
 dt = 0.05  # Time step (seconds)
-k_spring = 3  # Spring constant for collisions
+k_spring = 5  # Spring constant for collisions
 selected_cell = None  # Track selected cell
-b_drag = 0.1  # Drag coefficient
+b_drag = 1.0  # Drag coefficient
 
 # Growth parameters (Hill equation based on size)
 V_max = 0.3  # Max growth rate (radius units/second)
@@ -63,7 +63,7 @@ def update(frame):
         cells_to_keep = []
         for cell in cells:
             r = cell["patch"].radius
-            if r >= 0.95 * r_max:  # Within 5% of max radius
+            if r >= 0.93 * r_max:  # Within 7% of max radius
                 x, y = cell["patch"].center
                 cell["label"].remove()
 
@@ -316,7 +316,7 @@ def update_selection():
             growth_capacity = max(r_max - r, 0)
             growth_rate = V_max * (growth_capacity**n / (K**n + growth_capacity**n))
             force_mag = np.linalg.norm(cell.get("last_force", np.array([0.0, 0.0])))
-            inhibition = 1 / (1 + np.exp(-s * (force_mag - F0)))
+            inhibition = 1.2 / (1 + np.exp(-s * (force_mag - F0)))
             growth_rate *= 1 - inhibition - decay
             color = cmap(norm(growth_rate))
             cell["patch"].set_color(color)
